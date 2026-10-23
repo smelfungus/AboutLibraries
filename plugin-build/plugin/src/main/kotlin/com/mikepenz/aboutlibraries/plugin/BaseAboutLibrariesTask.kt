@@ -12,6 +12,7 @@ import org.gradle.api.artifacts.Configuration
 import org.gradle.api.artifacts.ConfigurationContainer
 import org.gradle.api.artifacts.component.ModuleComponentIdentifier
 import org.gradle.api.artifacts.dsl.DependencyHandler
+import org.gradle.api.artifacts.result.ResolvedArtifactResult
 import org.gradle.api.file.ConfigurableFileCollection
 import org.gradle.api.file.DirectoryProperty
 import org.gradle.api.plugins.ExtensionContainer
@@ -27,6 +28,8 @@ import org.gradle.api.tasks.Internal
 import org.gradle.api.tasks.Optional
 import org.gradle.api.tasks.PathSensitive
 import org.gradle.api.tasks.PathSensitivity
+import org.gradle.maven.MavenModule
+import org.gradle.maven.MavenPomArtifact
 import org.gradle.work.DisableCachingByDefault
 import org.jetbrains.kotlin.gradle.dsl.KotlinSingleTargetExtension
 import org.jetbrains.kotlin.gradle.plugin.KotlinTargetsContainer
@@ -419,20 +422,67 @@ abstract class BaseAboutLibrariesTask : DefaultTask() {
             val artifacts = detached.incoming.artifactView { view -> view.lenient(true) }.artifacts
             for (artifact in artifacts) {
                 val id = artifact.id.componentIdentifier as? ModuleComponentIdentifier ?: continue
-                val key = "${id.group}:${id.module}:${id.version}"
-                if (pomMap.containsKey(key)) continue
-                val file = artifact.file
-                pomMap[key] = file.absolutePath
-
-                // Parse the POM to discover the parent and queue it for the next level.
-                val parent = readParent(file) ?: continue
-                val parentCoords = DependencyCoordinates(parent.first, parent.second, parent.third)
-                if (parentCoords.cacheKey() !in attempted) {
-                    parentsToFetch.add(parentCoords)
-                }
+                recordPom(id, artifact.file, pomMap, parentsToFetch, attempted)
             }
         } catch (e: Exception) {
             LOGGER.warn("Failed to resolve POM batch (${batch.joinToString { it.cacheKey() }}); some library metadata may be incomplete", e)
+        }
+
+        // The detached configuration requests no attributes, so a module publishing several variants
+        // told apart only by attributes (Android debug and release variants, for example) fails
+        // variant selection above, and the lenient view drops it. A platform artifact reached through
+        // an `available-at` redirect is left as it is: its redirect shell stands for it.
+        val missing = batch.filter { it.cacheKey() !in pomMap && it.rootModule == null }
+        if (missing.isNotEmpty()) {
+            fetchPomsWithoutVariantSelection(missing, pomMap, parentsToFetch, attempted, dependencyHandler)
+        }
+    }
+
+    /**
+     * Fetches the POMs of [coordinates] through Gradle's artifact resolution query, which looks up a
+     * module's POM directly instead of selecting one of its variants.
+     */
+    private fun fetchPomsWithoutVariantSelection(
+        coordinates: List<DependencyCoordinates>,
+        pomMap: MutableMap<String, String>,
+        parentsToFetch: ArrayDeque<DependencyCoordinates>,
+        attempted: Set<String>,
+        dependencyHandler: DependencyHandler,
+    ) {
+        try {
+            val query = dependencyHandler.createArtifactResolutionQuery()
+            coordinates.forEach { query.forModule(it.group, it.artifact, it.version) }
+            val result = query.withArtifacts(MavenModule::class.java, MavenPomArtifact::class.java).execute()
+            for (component in result.resolvedComponents) {
+                val id = component.id as? ModuleComponentIdentifier ?: continue
+                for (artifact in component.getArtifacts(MavenPomArtifact::class.java)) {
+                    if (artifact is ResolvedArtifactResult) {
+                        recordPom(id, artifact.file, pomMap, parentsToFetch, attempted)
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            LOGGER.warn("Failed to resolve POMs (${coordinates.joinToString { it.cacheKey() }}); some library metadata may be incomplete", e)
+        }
+    }
+
+    /** Records [file] as the POM of [id], and queues its parent POM for the next level. */
+    private fun recordPom(
+        id: ModuleComponentIdentifier,
+        file: File,
+        pomMap: MutableMap<String, String>,
+        parentsToFetch: ArrayDeque<DependencyCoordinates>,
+        attempted: Set<String>,
+    ) {
+        val key = "${id.group}:${id.module}:${id.version}"
+        if (pomMap.containsKey(key)) return
+        pomMap[key] = file.absolutePath
+
+        // Parse the POM to discover the parent and queue it for the next level.
+        val parent = readParent(file) ?: return
+        val parentCoords = DependencyCoordinates(parent.first, parent.second, parent.third)
+        if (parentCoords.cacheKey() !in attempted) {
+            parentsToFetch.add(parentCoords)
         }
     }
 

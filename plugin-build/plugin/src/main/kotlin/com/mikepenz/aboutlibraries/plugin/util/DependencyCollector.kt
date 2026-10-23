@@ -201,9 +201,13 @@ internal class DependencyCollector(
             override fun newCopy(): ModelResolver = this
         }
 
+        // A platform artifact reached through an `available-at` redirect is listed through its
+        // redirect shell, so only the other dependencies without a POM are missing from the output.
+        val missing = ArrayList<String>()
         return mapNotNull { coordinates ->
             val file = pomFileMap[coordinates.cacheKey()] ?: run {
                 LOGGER.debug("No POM file found for {}, skipping", coordinates.cacheKey())
+                if (coordinates.rootModule == null) missing.add(coordinates.cacheKey())
                 return@mapNotNull null
             }
             val req = DefaultModelBuildingRequest().apply {
@@ -216,6 +220,10 @@ internal class DependencyCollector(
             val result = builder.build(req)
             loadLibraryFromPom(coordinates, result.effectiveModel) { modelId ->
                 result.getRawModel(modelId)
+            }
+        }.also {
+            if (missing.isNotEmpty()) {
+                LOGGER.warn("No POM could be resolved for these dependencies, so they are missing from the output: ${missing.joinToString()}")
             }
         }
     }
@@ -368,8 +376,8 @@ internal data class DependencyCoordinates(
      * `available-at` redirects as used by Kotlin Multiplatform publications
      * (`androidx.collection:collection` → `androidx.collection:collection-jvm`).
      *
-     * Only populated when `mergePlatformArtifacts` is enabled; `null` otherwise, and always `null` for
-     * artifacts that were not reached via a redirect.
+     * Populated for every artifact reached via a redirect, whether or not `mergePlatformArtifacts` is
+     * enabled (the flag only decides whether it becomes the reported `uniqueId`); `null` otherwise.
      *
      * Deliberately outside the constructor, so it takes no part in `equals`/`hashCode`: this
      * records *how* an artifact was reached, not which artifact it is. The same `g:a:v` can be

@@ -8,6 +8,7 @@ import com.mikepenz.aboutlibraries.plugin.mapping.Library
 import com.mikepenz.aboutlibraries.plugin.mapping.License
 import com.mikepenz.aboutlibraries.plugin.mapping.SpdxLicense
 import com.mikepenz.aboutlibraries.plugin.model.ResultContainer
+import com.mikepenz.aboutlibraries.plugin.util.LicenseUtil.isSpdxTextUnreachable
 import com.mikepenz.aboutlibraries.plugin.util.LicenseUtil.loadSpdxLicense
 import com.mikepenz.aboutlibraries.plugin.util.parser.FundingReader
 import com.mikepenz.aboutlibraries.plugin.util.parser.LibraryReader
@@ -247,14 +248,19 @@ internal class LibraryPostProcessor(
         }
 
         // Download content for all licenses missing the content
+        val unreachable = ArrayList<String>()
         licensesMap.values.forEach {
             if (it.content.isNullOrBlank()) {
                 if (!offlineMode) {
                     it.loadSpdxLicense(mapLicensesToSpdx)
+                    if (it.isSpdxTextUnreachable()) unreachable.add(it.spdxId ?: it.name)
                 } else {
                     LOGGER.warn("--> `${it.name}` does not contain the license text and configuration is in OFFLINE MODE. Please provide manually with `name`: `${it.name}` and `hash`: `${it.hash}`")
                 }
             }
+        }
+        if (unreachable.isNotEmpty()) {
+            LOGGER.warn("Could not download the text of these licenses, so they are exported without it: ${unreachable.joinToString()}. Check the connection to spdx.org, or enable `offlineMode` to skip the download.")
         }
 
         return ResultContainer(

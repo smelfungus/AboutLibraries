@@ -4,28 +4,50 @@ import com.mikepenz.aboutlibraries.plugin.mapping.License
 import com.mikepenz.aboutlibraries.plugin.mapping.SpdxLicense
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
+import java.io.FileNotFoundException
 import java.net.URL
 
 object LicenseUtil {
     private val LOGGER: Logger = LoggerFactory.getLogger(LicenseUtil::class.java)
 
-    private val remoteLicenseCache = HashMap<String, String>()
+    /** What each requested URL came to, failures included, so a URL is requested only once. */
+    private val remoteLicenseCache = HashMap<String, RemoteText>()
+
+    private sealed interface RemoteText {
+        data class Found(val text: String) : RemoteText
+
+        /** The server answered that it has no text there: SPDX has none for some licenses [SpdxLicense] knows. */
+        data object Missing : RemoteText
+
+        /** The request failed without that answer: no network, a refused or timed-out connection, an error status. */
+        data object Unreachable : RemoteText
+    }
 
     internal fun loadLicenseCached(url: String): String? {
-        return try {
-            if (remoteLicenseCache.containsKey(url)) {
-                remoteLicenseCache[url]?.takeIf { it.isNotBlank() }
-            } else {
-                remoteLicenseCache[url] = ""
-                URL(url).readText().let {
-                    val trimmed = it.trimIndent() // cleanup empty lines before and after, and any indent.
-                    remoteLicenseCache[url] = trimmed
-                    trimmed
-                }
+        val remoteText = remoteLicenseCache.getOrPut(url) {
+            try {
+                // cleanup empty lines before and after, and any indent.
+                RemoteText.Found(URL(url).readText().trimIndent())
+            } catch (e: FileNotFoundException) {
+                RemoteText.Missing
+            } catch (t: Throwable) {
+                RemoteText.Unreachable
             }
-        } catch (t: Throwable) {
-            null
         }
+        return (remoteText as? RemoteText.Found)?.text?.takeIf { it.isNotBlank() }
+    }
+
+    /** `true` when a request for [url] failed without the server answering that there is no text. */
+    internal fun isUnreachable(url: String): Boolean = remoteLicenseCache[url] == RemoteText.Unreachable
+
+    /**
+     * `true` when this license has no text because its SPDX text couldn't be downloaded, rather than
+     * because SPDX has none.
+     */
+    internal fun License.isSpdxTextUnreachable(): Boolean {
+        if (!content.isNullOrBlank()) return false
+        val enumLicense = spdxId?.let { SpdxLicense.find(it) } ?: return false
+        return isUnreachable(enumLicense.getTxtUrl()) || isUnreachable(enumLicense.getFallbackTxtUrl())
     }
 
     fun License.loadSpdxLicense(mapToSpdx: Boolean = true) {

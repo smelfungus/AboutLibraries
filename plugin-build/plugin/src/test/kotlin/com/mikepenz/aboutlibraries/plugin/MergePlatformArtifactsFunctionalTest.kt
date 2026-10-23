@@ -232,6 +232,9 @@ class MergePlatformArtifactsFunctionalTest {
             .build()
 
         assertEquals(TaskOutcome.SUCCESS, result.task(":exportLibraryDefinitions")?.outcome)
+        // Platform artifacts without a POM (klibs) are listed through their redirect shell, so none
+        // of them is reported missing.
+        assertFalse(result.output.contains("missing from the output"), "No dependency should be reported missing. Output:\n${result.output}")
         return File(projectDir, "build/generated/aboutLibraries/aboutlibraries.json").readText()
     }
 
